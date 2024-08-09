@@ -133,6 +133,10 @@ class InteractiveToolPropagatorSQLAlchemy:
 
     def remove_entry_point(self, entry_point):
         """Convenience method to easily remove an entry_point."""
+        print("REMOVE ENTRY POINT", self.get(
+            key=self._encode_id(entry_point.id),
+            key_type=entry_point.__class__.__name__.lower(),
+        ))
         return self.remove(key=self._encode_id(entry_point.id), key_type=entry_point.__class__.__name__.lower())
 
 
