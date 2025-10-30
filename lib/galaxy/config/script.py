@@ -79,15 +79,16 @@ def main(argv=None):
     data_dir = os.path.abspath(data_dir)
 
     mode = _determine_mode(args)
+    substitutions = GALAXY_CONFIG_SUBSTITUTIONS.copy()
     if args.db_conn:
-        GALAXY_CONFIG_SUBSTITUTIONS["  #database_connection: null"] = "  database_connection: ${database_connection}"
+        substitutions["  #database_connection: null"] = "  database_connection: ${database_connection}"
 
     for directory in (config_dir, data_dir):
         if not os.path.exists(directory):
             os.makedirs(directory)
 
     print(f"* Bootstrapping Galaxy configuration into directory: {relative_config_dir}")
-    _handle_galaxy_yml(args, config_dir, data_dir)
+    _handle_galaxy_yml(args, config_dir, data_dir, substitutions)
     _print_config_summary(args, mode, relative_config_dir)
 
 
@@ -126,7 +127,7 @@ def _determine_yml_file(config_dir):
     return os.path.join(config_dir, DEFAULT_YML)
 
 
-def _handle_galaxy_yml(args, config_dir, data_dir):
+def _handle_galaxy_yml(args, config_dir, data_dir, substitutions):
     force = args.force
     yml_file = _determine_yml_file(config_dir)
     _check_file(yml_file, force)
@@ -142,7 +143,7 @@ def _handle_galaxy_yml(args, config_dir, data_dir):
     with open(GALAXY_CONFIG_TEMPLATE_FILE) as fh:
         for line in fh:
             line = line.rstrip("\n")
-            for k, v in GALAXY_CONFIG_SUBSTITUTIONS.items():
+            for k, v in substitutions.items():
                 if line == k:
                     line = v
             galaxy_config_template.append(line)
