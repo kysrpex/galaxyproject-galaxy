@@ -1,4 +1,8 @@
-"""Galaxy FileSource implementation for OSF."""
+"""Galaxy FileSource implementation for OSF.
+
+# A general overview of the implementation should be included here;
+# inspiration may be taken from elabftw.py or rspace.py.
+"""
 
 from abc import ABC
 from pathlib import Path
@@ -76,9 +80,25 @@ class ValidationError(galaxy_exceptions.MessageException, OSFFilesSourceExceptio
 
 
 class OSFClient:
+
     def __init__(self, base_url: str, token: str):
         self.base_url = base_url.rstrip("/") + "/"
         self.waterbutler_base_url = self.base_url.replace("api.osf.io/v2", "files.osf.io/v1")
+        # In the "Software requirements specification" document, under
+        # "Product functions" [1], it is stated that "Configure the OSF
+        # Endpoint: Allow users to select the OSF endpoint they want to
+        # interact with." is a major function of the OSF files source plugin.
+        # I reckon that having made it a labeled requirement (e.g. REQ-X.Y
+        # under "Functional Requirements" [2]) would have made it clearer.
+        #
+        # Nevertheless, the way `self.waterbutler_base_url` is constructed
+        # does not satisfy this requirement, because it will only work with
+        # the official public instance. A more flexible approach is necessary.
+        #
+        # References:
+        # [1] - https://github.com/padinaalmai/osf-file-source-plugin/blob/0d29f7b4490ca92b48f790f3895fab94d5e70234/docs/0%20-%20Software%20Requirements%20Specification.md#22-product-functions
+        # [2] - https://github.com/padinaalmai/osf-file-source-plugin/blob/0d29f7b4490ca92b48f790f3895fab94d5e70234/docs/0%20-%20Software%20Requirements%20Specification.md#3-functional-requirements
+
         self._session = requests.Session()
         self._session.headers.update({
             "Authorization": f"Bearer {token}",
@@ -87,6 +107,7 @@ class OSFClient:
 
     def _request(self, method: str, endpoint: str, **kwargs) -> dict:
         url = urljoin(self.base_url, endpoint.lstrip("/"))
+        # sorry for being misleading, `lstrip("/")` is actually needed
         response = self._session.request(method, url, **kwargs)
         response.raise_for_status()
         return response.json()
@@ -99,15 +120,28 @@ class OSFClient:
         write_intent: bool = False,
         sort: Optional[str] = None,
     ) -> dict:
-        params: dict[str, Any] = {"page": page, "page[size]": page_size}
+        # It's still pending to show also public projects.
+        #
+        # I recall that sending a GET request to "nodes/" breaks `"filter[
+        # current_user_permissions]"`. However, that doesn't stop you from
+        # using it when `write_intent == False`.
+        #
+        # That is, make use of `users/me/nodes/` when `write_intent == True`
+        # and switch to `nodes/` when `write_intent == False`.
+        endpoint =  "nodes/"
+        params: dict[str, Any] = {
+            "page": page,
+            "page[size]": page_size,
+        }
         if query:
             params["filter[title]"] = query
         if write_intent:
+            endpoint = "users/me/nodes/"
             params["filter[current_user_permissions]"] = "write"
         if sort:
             params["sort"] = sort
         return self._request(
-            "GET", "users/me/nodes/",
+            "GET", endpoint,
             params=params, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
         )
 
@@ -124,7 +158,7 @@ class OSFClient:
         if sort:
             params["sort"] = sort
         return self._request(
-            "GET", "users/me/registrations/",
+            "GET", "registrations/",
             params=params, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
         )
 
@@ -155,13 +189,35 @@ class OSFClient:
         )
         return payload.get("data", [])
 
-    def create_project(self, payload: dict) -> dict:
+    def create_project(
+        self,
+        title: str,
+        description: str,
+    ) -> dict:
+        # Taking only the title and the description as arguments and
+        # constructing the payload here is intentional. Take into account that
+        # the `OSFClient` is what interacts with the OSF API, thus ideally
+        # only `OSFClient` should know about the shape of the payload.
+        #
+        # This is a design choice that reduces the coupling between the API
+        # and the rest of the program. If done this way, changes in the API
+        # only affect the `OSFClient` class.
+        payload = {
+            "data": {
+                "type": "nodes",
+                "attributes": {
+                    "title": title,
+                    "category": "project",
+                    "public": False,
+                    "description": description,
+                },
+            }
+        }
         return self._request(
             "POST", "nodes/",
             json=payload, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
-        )
+        ).get("data", {})
 
-    # WaterButler
     def waterbutler_url(self, container_id: str, wb_path: str = "/") -> str:
         if not wb_path.startswith("/"):
             wb_path = "/" + wb_path
@@ -226,6 +282,8 @@ def galaxy_pagination_to_osf(
     """
     page_size = min(limit, OSF_MAX_PAGE_SIZE) if limit else OSF_MAX_PAGE_SIZE
     page = ((offset or 0) // page_size) + 1
+    # the `OSF_MAX_PAGE_SIZE` turned out to be great (see comment I made about
+    # listing all files on `OSFRepositoryInteractor.get_files_search_results()`
     return page, page_size
 
 
@@ -282,6 +340,11 @@ class OSFRepositoryInteractor(RDMRepositoryInteractor):
         )
         nodes = [n for n in payload.get("data", []) if not has_parent(n)]
         total = int(payload["links"]["meta"]["total"])
+        # Please note that the total is still wrong, because even if nodes for
+        # which `has_parent(n) == True` are being filtered out, those are not
+        # being removed from the total (that can only possibly be solved by
+        # filtering them out on the server, via a specifically tailored
+        # request).
         containers = [
             RemoteDirectory(
                 name=node_title(node),
@@ -327,8 +390,12 @@ class OSFRepositoryInteractor(RDMRepositoryInteractor):
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> tuple[list[RemoteFile], int]:
-        if not query:
-            return [], 0
+        # It's ok to list all files, the server paginates the query and only
+        # retrieves a few of them. I reckon it feels useless; if I found the
+        # file I was looking for without entering any text in the search box,
+        # I would probably start buying lottery every day. But showing the
+        # useless list lets the user know the plugin is working and more
+        # importantly, nudges them to write something in the search box.
         client = self._client(context)
         page, page_size = galaxy_pagination_to_osf(limit, offset)
         payload = client.list_files(
@@ -441,18 +508,10 @@ class OSFRepositoryInteractor(RDMRepositoryInteractor):
         public_name: str,
         context: FilesSourceRuntimeContext[RDMFileSourceConfiguration],
     ) -> dict[str, Any]:
-        payload = {
-            "data": {
-                "type": "nodes",
-                "attributes": {
-                    "title": title,
-                    "category": "project",
-                    "public": False,
-                    "description": f"Created by Galaxy on behalf of {public_name}",
-                },
-            }
-        }
-        return self._client(context).create_project(payload).get("data", {})
+        return self._client(context).create_project(
+            title=title,
+            description=f"Created by Galaxy on behalf of {public_name}",
+        )
 
     def upload_file_to_draft_container(
         self,
@@ -493,6 +552,16 @@ class OSFRepositoryInteractor(RDMRepositoryInteractor):
         so we list each level, pick the named child, and descend using its
         ``attributes.path``.
         """
+        # I still wonder if there is a non-recursive approach available?
+        # (there might not be). If there was, then that would greatly speed up
+        # this process.
+        #
+        # Superficial thoughts on this tell me that there is likely a way if
+        # Galaxy paths match the internal ids in OSF rather than the names
+        # that are visible to the users. Keep in mind that we are in control
+        # of both the names that are shown to the users and the URI that
+        # Galaxy works with (via the `name` attribute of `RemoteDirectory` and
+        # `RemoteFile`). It does not matter if the URI is not human-readable.
         current_path = "/"
         leaf: Optional[dict] = None
         for segment in segments:
